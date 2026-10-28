@@ -3,6 +3,7 @@
 #include <DHT.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <WebServer.h>
 #include <Wire.h>
 #include <time.h>
@@ -10,7 +11,7 @@
 // ================= FIREBASE CONFIG =================
 // Fill these in after creating your Firebase project
 const char *FIREBASE_HOST =
-    "https://fxv-detection-default-rtdb.asia-southeast1.firebasedatabase.app/";
+    "https://fxv-detection-default-rtdb.asia-southeast1.firebasedatabase.app";
 const char *FIREBASE_AUTH =
     "5ZwVmC5VkqUWeR2GEl5VMLd8flRv7DJo0qSiTa9i"; // Project Settings > Service
                                                 // Accounts > Database Secrets
@@ -56,9 +57,13 @@ int gasLevelState = 0;
 bool prevGasWarning = false;
 bool prevTempWarning = false;
 
+// Firebase diagnostic tracking
+int lastFirebaseStatus = 0;
+String lastFirebaseError = "No push attempted yet";
+
 // ================= TIMING =================
 unsigned long previousReadTime = 0;
-const unsigned long READ_INTERVAL = 2000; // read & push every 2 seconds
+const unsigned long READ_INTERVAL = 3000; // read & push every 3 seconds (allows time for TLS handshake)
 const unsigned long WARNING_CHIRP_DURATION = 150;
 
 // ================= HOURLY AVERAGE ACCUMULATORS =================
@@ -116,32 +121,91 @@ long getUnixTimestamp() {
 
 // PUT overwrites a path (used for current readings & hourly averages)
 void firebasePut(String path, String jsonBody) {
-  if (WiFi.status() != WL_CONNECTED)
+  if (WiFi.status() != WL_CONNECTED) {
+    lastFirebaseStatus = -99;
+    lastFirebaseError = "WiFi not connected";
+    Serial.println("Firebase PUT skipped: WiFi not connected");
     return;
-  HTTPClient http;
-  String url = String(FIREBASE_HOST) + path + "?auth=" + FIREBASE_AUTH;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.PUT(jsonBody);
-  if (code < 0) {
-    Serial.println("Firebase PUT error: " + http.errorToString(code));
   }
-  http.end();
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(10000);
+
+  String host = String(FIREBASE_HOST);
+  while (host.endsWith("/")) {
+    host = host.substring(0, host.length() - 1);
+  }
+  if (!path.startsWith("/")) {
+    path = "/" + path;
+  }
+  String url = host + path + "?auth=" + FIREBASE_AUTH;
+
+  if (http.begin(client, url)) {
+    http.addHeader("Content-Type", "application/json");
+    int code = http.PUT(jsonBody);
+    lastFirebaseStatus = code;
+    if (code > 0) {
+      if (code == HTTP_CODE_OK || code == 204) {
+        lastFirebaseError = "OK (200)";
+      } else {
+        lastFirebaseError = "HTTP " + String(code) + ": " + http.getString();
+        Serial.print("Firebase PUT warning: ");
+        Serial.println(lastFirebaseError);
+      }
+    } else {
+      lastFirebaseError = http.errorToString(code);
+      Serial.println("Firebase PUT error: " + lastFirebaseError);
+    }
+    http.end();
+  } else {
+    lastFirebaseStatus = -98;
+    lastFirebaseError = "Unable to initialize HTTPClient connection";
+    Serial.println("Firebase PUT failed: unable to begin connection");
+  }
 }
 
 // POST creates a new child with a unique Firebase key (used for alerts)
 void firebasePost(String path, String jsonBody) {
-  if (WiFi.status() != WL_CONNECTED)
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("Firebase POST skipped: WiFi not connected");
     return;
-  HTTPClient http;
-  String url = String(FIREBASE_HOST) + path + "?auth=" + FIREBASE_AUTH;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(jsonBody);
-  if (code < 0) {
-    Serial.println("Firebase POST error: " + http.errorToString(code));
   }
-  http.end();
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(10000);
+
+  String host = String(FIREBASE_HOST);
+  while (host.endsWith("/")) {
+    host = host.substring(0, host.length() - 1);
+  }
+  if (!path.startsWith("/")) {
+    path = "/" + path;
+  }
+  String url = host + path + "?auth=" + FIREBASE_AUTH;
+
+  if (http.begin(client, url)) {
+    http.addHeader("Content-Type", "application/json");
+    int code = http.POST(jsonBody);
+    if (code > 0) {
+      if (code != HTTP_CODE_OK && code != 204) {
+        Serial.print("Firebase POST warning [status ");
+        Serial.print(code);
+        Serial.print("]: ");
+        Serial.println(http.getString());
+      }
+    } else {
+      Serial.println("Firebase POST error: " + http.errorToString(code));
+    }
+    http.end();
+  } else {
+    Serial.println("Firebase POST failed: unable to begin connection");
+  }
 }
 
 // ================= PUSH FUNCTIONS =================
@@ -205,9 +269,17 @@ void handleSensorData() {
   json += "\"temp\":" + (isnan(temperature) ? "null" : String(temperature, 1)) +
           ",";
   json += "\"hum\":" + (isnan(humidity) ? "null" : String(humidity, 1)) + ",";
-  json += "\"state\":" + String(gasLevelState);
+  json += "\"state\":" + String(gasLevelState) + ",";
+  json += "\"firebase_status\":" + String(lastFirebaseStatus) + ",";
+  json += "\"firebase_error\":\"" + lastFirebaseError + "\"";
   json += "}";
   server.send(200, "application/json", json);
+}
+
+void handleTestFirebase() {
+  pushCurrentReadings();
+  String result = "Triggered push! Status: " + String(lastFirebaseStatus) + " - " + lastFirebaseError;
+  server.send(200, "text/plain", result);
 }
 
 void handleRoot() {
@@ -416,6 +488,7 @@ void setup() {
     Serial.println("WiFi Connected! IP: " + WiFi.localIP().toString());
     server.on("/", handleRoot);
     server.on("/data", handleSensorData);
+    server.on("/test-firebase", handleTestFirebase);
     server.begin();
     Serial.println("Live dashboard: http://" + WiFi.localIP().toString());
     syncTime();

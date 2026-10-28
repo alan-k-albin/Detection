@@ -224,6 +224,9 @@
   <header>
     <h1>🏠 Home Safety Monitor</h1>
     <p>Live sensor data from your ESP32</p>
+    <div id="fb-status" style="margin-top: 8px; font-size: 13px; font-weight: 500; color: #94a3b8;">
+      <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#f59e0b; margin-right:6px;"></span>Connecting to Firebase...
+    </div>
   </header>
 
   <!-- Status banner -->
@@ -314,11 +317,26 @@
       return new Date(unix * 1000).toLocaleString();
     }
 
+    // ── Connection Status Tracking ──────────────
+    const statusEl = document.getElementById('fb-status');
+
+    db.ref('.info/connected').on('value', snap => {
+      if (snap.val() === true) {
+        statusEl.innerHTML = '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#22c55e; margin-right:6px;"></span>Connected to Firebase';
+      } else {
+        statusEl.innerHTML = '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#f59e0b; margin-right:6px;"></span>Disconnected from Firebase (Reconnecting...)';
+      }
+    });
+
     // ── 1. Live Readings (real-time WebSocket) ───
 
     db.ref('/sensors/current').on('value', snap => {
       const d = snap.val();
-      if (!d) return;
+      if (!d) {
+        statusEl.innerHTML = '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#38bdf8; margin-right:6px;"></span>Connected to Firebase &bull; Waiting for ESP32 data...';
+        return;
+      }
+      statusEl.innerHTML = '<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#22c55e; margin-right:6px;"></span>Live Data Stream Active';
 
       document.getElementById('val-gas').textContent = d.gas ?? '—';
       document.getElementById('val-temp').textContent = fmt(d.temp);
@@ -344,6 +362,9 @@
       document.getElementById('card-temp').classList.toggle('warn', !!d.temp_warning);
 
       document.getElementById('last-updated').textContent = tsToLocal(d.timestamp);
+    }, err => {
+      console.error('Firebase read error:', err);
+      statusEl.innerHTML = `<span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#ef4444; margin-right:6px;"></span>Firebase Error: ${err.message} (Check Database Rules)`;
     });
 
     // ── 2. Hourly Averages (fetched once, updates every 60 s) ──
@@ -373,6 +394,10 @@
             <td>${h.samples ?? '—'}</td>
           </tr>
         `).join('');
+        }, err => {
+          console.error("Hourly fetch error:", err);
+          document.getElementById('hourly-body').innerHTML = 
+            `<tr><td colspan="5" class="empty" style="color:#ef4444;">Error: ${err.message}</td></tr>`;
         });
     }
 
@@ -405,6 +430,10 @@
           <div class="alert-time">${tsToLocal(a.timestamp)}</div>
         </div>
       `).join('');
+      }, err => {
+        console.error("Alerts fetch error:", err);
+        document.getElementById('alerts-list').innerHTML = 
+          `<div class="empty" style="color:#ef4444;">Error: ${err.message}</div>`;
       });
   </script>
 </body>
