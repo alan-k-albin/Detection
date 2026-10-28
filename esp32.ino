@@ -3,6 +3,7 @@
 #include <DHT.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <WebServer.h>
 #include <Wire.h>
 #include <time.h>
 
@@ -18,6 +19,8 @@ const char *FIREBASE_AUTH =
 const char *WIFI_SSID = "LAPTOP-S6L4UED5 7744";
 const char *WIFI_PASSWORD = "ALAN1125";
 
+WebServer server(80);
+
 // ================= OLED CONFIGURATION =================
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -30,11 +33,15 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #define GAS_PIN 34
 #define DHT_PIN 27
 #define BUZZER_PIN 26
+#define GREEN_LED_PIN 18
+#define RED_LED1_PIN 19
+#define RED_LED2_PIN 23
 #define DHT_TYPE DHT22
 
 DHT dht(DHT_PIN, DHT_TYPE);
 
-const int GAS_THRESHOLD = 1000;
+const int GAS_WARNING_THRESHOLD = 950;
+const int GAS_HIGH_THRESHOLD = 1800;
 const float TEMP_THRESHOLD = 35.0; // °C — flagged as dangerously high
 
 // ================= SENSOR STATE =================
@@ -43,6 +50,7 @@ float temperature = NAN;
 float humidity = NAN;
 bool gasWarning = false;
 bool tempWarning = false;
+int gasLevelState = 0;
 
 // Previous states — used to detect rising edge so we don't spam alerts
 bool prevGasWarning = false;
@@ -51,6 +59,7 @@ bool prevTempWarning = false;
 // ================= TIMING =================
 unsigned long previousReadTime = 0;
 const unsigned long READ_INTERVAL = 2000; // read & push every 2 seconds
+const unsigned long WARNING_CHIRP_DURATION = 150;
 
 // ================= HOURLY AVERAGE ACCUMULATORS =================
 double sumGas = 0;
@@ -188,6 +197,113 @@ void logAlert(String type, String message) {
   Serial.println("Alert logged: " + message);
 }
 
+// ================= LIVE WEBSITE HANDLERS =================
+
+void handleSensorData() {
+  String json = "{";
+  json += "\"gas\":" + String(gasValue) + ",";
+  json += "\"temp\":" + (isnan(temperature) ? "null" : String(temperature, 1)) +
+          ",";
+  json += "\"hum\":" + (isnan(humidity) ? "null" : String(humidity, 1)) + ",";
+  json += "\"state\":" + String(gasLevelState);
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleRoot() {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Gas &amp; Climate Monitor</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; text-align: center; margin: 0; padding: 20px; }
+    h1 { font-size: 22px; margin-bottom: 15px; }
+    .status-banner { padding: 15px; border-radius: 10px; font-weight: bold; font-size: 18px; max-width: 400px; margin: 0 auto 20px; }
+    .safe { background: #16a34a; color: white; }
+    .warn { background: #ea580c; color: white; }
+    .danger { background: #dc2626; color: white; animation: blink 0.8s infinite; }
+    @keyframes blink { 50% { opacity: 0.4; } }
+    .card-grid { display: flex; flex-wrap: wrap; justify-content: center; gap: 15px; max-width: 420px; margin: 0 auto; }
+    .card { background: #1e293b; padding: 20px; border-radius: 12px; width: 100%; box-sizing: border-box; box-shadow: 0 4px 10px rgba(0,0,0,0.3); }
+    .label { font-size: 14px; color: #94a3b8; text-transform: uppercase; }
+    .val { font-size: 34px; font-weight: bold; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Home Safety Monitor</h1>
+  <div id="banner" class="status-banner safe">STATUS: NORMAL (GREEN LED)</div>
+  <div class="card-grid">
+    <div class="card">
+      <div class="label">Gas Sensor Level</div>
+      <div class="val" id="gas">--</div>
+    </div>
+    <div class="card">
+      <div class="label">Temperature</div>
+      <div class="val"><span id="temp">--</span> &deg;C</div>
+    </div>
+    <div class="card">
+      <div class="label">Humidity</div>
+      <div class="val"><span id="hum">--</span> %</div>
+    </div>
+  </div>
+  <script>
+    function fetchReadings() {
+      fetch('/data').then(response => response.json()).then(data => {
+        document.getElementById('gas').innerText = data.gas;
+        document.getElementById('temp').innerText = data.temp === null ? '--' : data.temp;
+        document.getElementById('hum').innerText = data.hum === null ? '--' : data.hum;
+        const banner = document.getElementById('banner');
+        if (data.state === 2) {
+          banner.className = 'status-banner danger';
+          banner.innerText = 'CRITICAL GAS LEVEL (2 RED LEDS)';
+        } else if (data.state === 1) {
+          banner.className = 'status-banner warn';
+          banner.innerText = 'GAS WARNING (1 RED LED)';
+        } else {
+          banner.className = 'status-banner safe';
+          banner.innerText = 'STATUS: NORMAL (GREEN LED)';
+        }
+      });
+    }
+    setInterval(fetchReadings, 2000);
+    fetchReadings();
+  </script>
+</body>
+</html>
+)rawliteral";
+  server.send(200, "text/html", html);
+}
+
+// ================= LED & BUZZER CONTROLLER =================
+
+void updateIndicators() {
+  if (gasValue >= GAS_HIGH_THRESHOLD) {
+    gasLevelState = 2;
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RED_LED1_PIN, HIGH);
+    digitalWrite(RED_LED2_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH);
+  } else if (gasValue >= GAS_WARNING_THRESHOLD) {
+    gasLevelState = 1;
+    digitalWrite(GREEN_LED_PIN, LOW);
+    digitalWrite(RED_LED1_PIN, HIGH);
+    digitalWrite(RED_LED2_PIN, LOW);
+    digitalWrite(BUZZER_PIN,
+                 tempWarning ||
+                         millis() - previousReadTime < WARNING_CHIRP_DURATION
+                     ? HIGH
+                     : LOW);
+  } else {
+    gasLevelState = 0;
+    digitalWrite(GREEN_LED_PIN, HIGH);
+    digitalWrite(RED_LED1_PIN, LOW);
+    digitalWrite(RED_LED2_PIN, LOW);
+    digitalWrite(BUZZER_PIN, tempWarning ? HIGH : LOW);
+  }
+}
+
 // ================= OLED DISPLAY =================
 
 void showDisplay() {
@@ -234,7 +350,12 @@ void showDisplay() {
   }
 
   // Bottom status bar
-  if (gasWarning || tempWarning) {
+  if (gasLevelState == 2) {
+    display.fillRect(0, 51, 128, 13, SSD1306_WHITE);
+    display.setTextColor(SSD1306_BLACK);
+    display.setCursor(5, 54);
+    display.println("!! CRITICAL GAS !!");
+  } else if (gasWarning || tempWarning) {
     display.fillRect(0, 51, 128, 13, SSD1306_WHITE);
     display.setTextColor(SSD1306_BLACK);
     display.setCursor(5, 54);
@@ -242,7 +363,7 @@ void showDisplay() {
   } else {
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 54);
-    display.println("Status: Monitoring");
+    display.println("Status: SAFE (Green)");
   }
 
   display.display();
@@ -256,7 +377,13 @@ void setup() {
 
   pinMode(GAS_PIN, INPUT);
   pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED1_PIN, OUTPUT);
+  pinMode(RED_LED2_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(GREEN_LED_PIN, LOW);
+  digitalWrite(RED_LED1_PIN, LOW);
+  digitalWrite(RED_LED2_PIN, LOW);
   analogReadResolution(12);
   Wire.begin(21, 22);
 
@@ -287,6 +414,10 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi Connected! IP: " + WiFi.localIP().toString());
+    server.on("/", handleRoot);
+    server.on("/data", handleSensorData);
+    server.begin();
+    Serial.println("Live dashboard: http://" + WiFi.localIP().toString());
     syncTime();
     currentHourKey = getHourKey();
 
@@ -310,6 +441,9 @@ void setup() {
 // ================= MAIN LOOP =================
 
 void loop() {
+  if (WiFi.status() == WL_CONNECTED)
+    server.handleClient();
+
   unsigned long currentTime = millis();
 
   if (currentTime - previousReadTime >= READ_INTERVAL) {
@@ -321,11 +455,11 @@ void loop() {
     humidity = dht.readHumidity();
 
     // 2. Evaluate warning conditions
-    gasWarning = (gasValue >= GAS_THRESHOLD);
+    gasWarning = (gasValue >= GAS_WARNING_THRESHOLD);
     tempWarning = (!isnan(temperature) && temperature >= TEMP_THRESHOLD);
 
-    // 3. Buzzer on either warning
-    digitalWrite(BUZZER_PIN, (gasWarning || tempWarning) ? HIGH : LOW);
+    // 3. Update gas-stage LEDs and buzzer
+    updateIndicators();
 
     // 4. Accumulate valid readings for hourly average
     if (!isnan(temperature) && !isnan(humidity)) {
@@ -362,5 +496,17 @@ void loop() {
 
     // 8. Update OLED
     showDisplay();
+
+    Serial.print("Gas: ");
+    Serial.print(gasValue);
+    Serial.print(" | State: ");
+    if (gasLevelState == 2)
+      Serial.println("CRITICAL (2 Red LEDs)");
+    else if (gasLevelState == 1)
+      Serial.println("WARNING (1 Red LED)");
+    else
+      Serial.println("NORMAL (Green LED)");
   }
+
+  updateIndicators();
 }
