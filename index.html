@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Home Safety Monitor</title>
+
+  <!-- Firebase SDKs (compat mode — works directly in a script tag) -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+
+    header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+    }
+
+    header p {
+      font-size: 13px;
+      color: #64748b;
+      margin-top: 4px;
+    }
+
+    /* ── Status Banner ── */
+    .banner {
+      max-width: 540px;
+      margin: 0 auto 28px;
+      padding: 14px 20px;
+      border-radius: 12px;
+      font-size: 18px;
+      font-weight: 700;
+      text-align: center;
+      transition: background 0.3s;
+    }
+
+    .banner.safe {
+      background: #16a34a;
+      color: #fff;
+    }
+
+    .banner.danger {
+      background: #dc2626;
+      color: #fff;
+      animation: blink 0.9s infinite;
+    }
+
+    @keyframes blink {
+      50% {
+        opacity: 0.55;
+      }
+    }
+
+    /* ── Section Headings ── */
+    .section-title {
+      font-size: 13px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #94a3b8;
+      margin-bottom: 12px;
+    }
+
+    /* ── Live Reading Cards ── */
+    .cards {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      max-width: 540px;
+      margin: 0 auto 36px;
+    }
+
+    .card {
+      background: #1e293b;
+      border-radius: 14px;
+      padding: 20px;
+      flex: 1 1 140px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+      text-align: center;
+    }
+
+    .card .label {
+      font-size: 12px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+    }
+
+    .card .value {
+      font-size: 36px;
+      font-weight: 800;
+      margin-top: 8px;
+      line-height: 1;
+    }
+
+    .card .unit {
+      font-size: 14px;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+
+    .card.warn {
+      border: 2px solid #dc2626;
+    }
+
+    /* ── Tables ── */
+    .table-wrap {
+      max-width: 540px;
+      margin: 0 auto 36px;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    thead th {
+      background: #1e293b;
+      padding: 10px 14px;
+      text-align: left;
+      color: #94a3b8;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      border-bottom: 1px solid #334155;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid #1e293b;
+    }
+
+    tbody tr:hover {
+      background: #1e293b55;
+    }
+
+    tbody td {
+      padding: 10px 14px;
+      color: #e2e8f0;
+    }
+
+    /* ── Alerts ── */
+    .alerts-list {
+      max-width: 540px;
+      margin: 0 auto 36px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .alert-item {
+      background: #1e293b;
+      border-radius: 10px;
+      padding: 14px 16px;
+      border-left: 4px solid #dc2626;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .alert-item.temperature {
+      border-left-color: #f59e0b;
+    }
+
+    .alert-msg {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .alert-meta {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+
+    .alert-time {
+      font-size: 12px;
+      color: #64748b;
+      white-space: nowrap;
+    }
+
+    .empty {
+      text-align: center;
+      color: #475569;
+      padding: 20px;
+      font-size: 14px;
+    }
+
+    .last-updated {
+      text-align: center;
+      font-size: 12px;
+      color: #475569;
+      margin-bottom: 36px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <header>
+    <h1>🏠 Home Safety Monitor</h1>
+    <p>Live sensor data from your ESP32</p>
+  </header>
+
+  <!-- Status banner -->
+  <div id="banner" class="banner safe">⬤ &nbsp; STATUS: SAFE</div>
+
+  <!-- ── LIVE READINGS ── -->
+  <div style="max-width:540px; margin:0 auto 12px;">
+    <div class="section-title">Live Readings</div>
+  </div>
+  <div class="cards">
+    <div class="card" id="card-gas">
+      <div class="label">Gas Sensor</div>
+      <div class="value" id="val-gas">--</div>
+      <div class="unit">ADC (0–4095)</div>
+    </div>
+    <div class="card" id="card-temp">
+      <div class="label">Temperature</div>
+      <div class="value" id="val-temp">--</div>
+      <div class="unit">°C</div>
+    </div>
+    <div class="card" id="card-hum">
+      <div class="label">Humidity</div>
+      <div class="value" id="val-hum">--</div>
+      <div class="unit">%</div>
+    </div>
+  </div>
+
+  <div class="last-updated">Last updated: <span id="last-updated">—</span></div>
+
+  <!-- ── HOURLY AVERAGES ── -->
+  <div style="max-width:540px; margin:0 auto 12px;">
+    <div class="section-title">Hourly Averages (last 24 h)</div>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Hour</th>
+          <th>Avg Gas</th>
+          <th>Avg Temp (°C)</th>
+          <th>Avg Humidity (%)</th>
+          <th>Samples</th>
+        </tr>
+      </thead>
+      <tbody id="hourly-body">
+        <tr>
+          <td colspan="5" class="empty">Loading…</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── ALERTS ── -->
+  <div style="max-width:540px; margin:0 auto 12px;">
+    <div class="section-title">Alert Log (last 20 events)</div>
+  </div>
+  <div class="alerts-list" id="alerts-list">
+    <div class="empty">Loading…</div>
+  </div>
+
+  <script>
+    // ══════════════════════════════════════════════
+    //  PASTE YOUR FIREBASE CONFIG HERE
+    //  (from Firebase Console → Project Settings → Your Apps → SDK snippet)
+    // ══════════════════════════════════════════════
+    const firebaseConfig = {
+      apiKey: "AIzaSyDZKyA57qkD_MpUEl6ORIaDb5_yw9qGNV8",
+      authDomain: "fxv-detection.firebaseapp.com",
+      databaseURL: "https://fxv-detection-default-rtdb.asia-southeast1.firebasedatabase.app",
+      projectId: "fxv-detection",
+      storageBucket: "fxv-detection.firebasestorage.app",
+      messagingSenderId: "413571509023",
+      appId: "1:413571509023:web:ba4980b8613a182d4bde2a",
+      measurementId: "G-WXV0NKPVYM"
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    // ── Helpers ──────────────────────────────────
+
+    function fmt(val, decimals = 1) {
+      return (val === null || val === undefined) ? '—' : Number(val).toFixed(decimals);
+    }
+
+    function tsToLocal(unix) {
+      if (!unix) return '—';
+      return new Date(unix * 1000).toLocaleString();
+    }
+
+    // ── 1. Live Readings (real-time WebSocket) ───
+
+    db.ref('/sensors/current').on('value', snap => {
+      const d = snap.val();
+      if (!d) return;
+
+      document.getElementById('val-gas').textContent = d.gas ?? '—';
+      document.getElementById('val-temp').textContent = fmt(d.temp);
+      document.getElementById('val-hum').textContent = fmt(d.hum);
+
+      // Warning states
+      const anyWarn = d.gas_warning || d.temp_warning;
+      const banner = document.getElementById('banner');
+
+      if (d.gas_warning) {
+        banner.className = 'banner danger';
+        banner.innerHTML = '⚠️ &nbsp; GAS LEAK DETECTED!';
+      } else if (d.temp_warning) {
+        banner.className = 'banner danger';
+        banner.innerHTML = '🌡️ &nbsp; HIGH TEMPERATURE ALERT!';
+      } else {
+        banner.className = 'banner safe';
+        banner.innerHTML = '⬤ &nbsp; STATUS: SAFE';
+      }
+
+      // Highlight warning cards
+      document.getElementById('card-gas').classList.toggle('warn', !!d.gas_warning);
+      document.getElementById('card-temp').classList.toggle('warn', !!d.temp_warning);
+
+      document.getElementById('last-updated').textContent = tsToLocal(d.timestamp);
+    });
+
+    // ── 2. Hourly Averages (fetched once, updates every 60 s) ──
+
+    function loadHourly() {
+      db.ref('/sensors/hourly')
+        .orderByKey()
+        .limitToLast(24)
+        .once('value', snap => {
+          const tbody = document.getElementById('hourly-body');
+          const data = snap.val();
+
+          if (!data) {
+            tbody.innerHTML = '<tr><td colspan="5" class="empty">No hourly data yet — data appears after the first full hour.</td></tr>';
+            return;
+          }
+
+          // Sort newest first
+          const rows = Object.entries(data).sort((a, b) => b[0].localeCompare(a[0]));
+
+          tbody.innerHTML = rows.map(([key, h]) => `
+          <tr>
+            <td>${h.hour_label ?? key}</td>
+            <td>${fmt(h.avg_gas, 0)}</td>
+            <td>${fmt(h.avg_temp)}</td>
+            <td>${fmt(h.avg_hum)}</td>
+            <td>${h.samples ?? '—'}</td>
+          </tr>
+        `).join('');
+        });
+    }
+
+    loadHourly();
+    setInterval(loadHourly, 60000); // refresh hourly table every minute
+
+    // ── 3. Alerts Log (fetched once; re-fetches whenever a new alert is added) ──
+
+    db.ref('/sensors/alerts')
+      .orderByChild('timestamp')
+      .limitToLast(20)
+      .on('value', snap => {
+        const container = document.getElementById('alerts-list');
+        const data = snap.val();
+
+        if (!data) {
+          container.innerHTML = '<div class="empty">No alerts recorded yet — great news! 🎉</div>';
+          return;
+        }
+
+        // Sort newest first
+        const items = Object.values(data).sort((a, b) => b.timestamp - a.timestamp);
+
+        container.innerHTML = items.map(a => `
+        <div class="alert-item ${a.type}">
+          <div>
+            <div class="alert-msg">${a.type === 'gas' ? '🔴 Gas Alert' : '🟡 Temperature Alert'}</div>
+            <div class="alert-meta">${a.message ?? ''} &nbsp;|&nbsp; Gas: ${a.gas ?? '—'} &nbsp;|&nbsp; Temp: ${fmt(a.temp)} °C &nbsp;|&nbsp; Hum: ${fmt(a.hum)} %</div>
+          </div>
+          <div class="alert-time">${tsToLocal(a.timestamp)}</div>
+        </div>
+      `).join('');
+      });
+  </script>
+</body>
+
+</html>
